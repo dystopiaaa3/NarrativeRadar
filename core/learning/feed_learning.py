@@ -138,6 +138,215 @@ class FeedLearningService:
         )
 
 
+    @staticmethod
+    def _implied_supply(
+        price,
+        market_cap
+    ):
+
+        try:
+            price = float(price or 0)
+            market_cap = float(market_cap or 0)
+        except (
+            TypeError,
+            ValueError,
+        ):
+            return 0.0
+
+        if (
+            price <= 0
+            or market_cap <= 0
+        ):
+            return 0.0
+
+        return (
+            market_cap
+            / price
+        )
+
+
+    def _latest_reference_price(
+        self,
+        db,
+        feed_case
+    ):
+
+        latest = (
+            db.query(
+                FeedOutcome
+            )
+            .filter(
+                FeedOutcome.feed_case_id
+                == feed_case.id
+            )
+            .order_by(
+                FeedOutcome.checked_at.desc()
+            )
+            .first()
+        )
+
+        if latest is not None:
+            price = self._safe_float(
+                latest.price
+            )
+
+            if price > 0:
+                return price
+
+        return self._safe_float(
+            feed_case.t0_price
+        )
+
+
+    def _market_snapshot_is_valid(
+        self,
+        feed_case,
+        market
+    ):
+
+        if not isinstance(
+            market,
+            dict
+        ):
+            return (
+                False,
+                "market_not_dict"
+            )
+
+        market_address = (
+            str(
+                market.get(
+                    "coin_address",
+                    ""
+                )
+                or ""
+            )
+            .strip()
+        )
+
+        expected_address = (
+            str(
+                feed_case.coin_address
+                or ""
+            )
+            .strip()
+        )
+
+        if (
+            market_address
+            and expected_address
+            and market_address
+            != expected_address
+        ):
+            return (
+                False,
+                "mint_mismatch"
+            )
+
+        if (
+            "valid" in market
+            and
+            not bool(
+                market.get(
+                    "valid"
+                )
+            )
+        ):
+            return (
+                False,
+                str(
+                    market.get(
+                        "validation_error"
+                    )
+                    or
+                    "collector_rejected_snapshot"
+                )
+            )
+
+        price = self._safe_float(
+            market.get(
+                "price"
+            )
+        )
+
+        market_cap = self._safe_float(
+            market.get(
+                "market_cap"
+            )
+        )
+
+        liquidity = self._safe_float(
+            market.get(
+                "liquidity"
+            )
+        )
+
+        if price <= 0:
+            return (
+                False,
+                "missing_price"
+            )
+
+        if market_cap <= 0:
+            return (
+                False,
+                "missing_market_cap"
+            )
+
+        if liquidity <= 0:
+            return (
+                False,
+                "missing_liquidity"
+            )
+
+        # Same-mint sanity check:
+        #
+        # market_cap / price approximates token supply.
+        # A genuine 99% collapse can still be valid because
+        # price and market cap fall together while implied
+        # supply remains broadly stable.
+        #
+        # A wrong token/pair or malformed market-cap field
+        # usually produces a wildly different implied supply.
+
+        t0_supply = self._implied_supply(
+            feed_case.t0_price,
+            feed_case.t0_market_cap
+        )
+
+        current_supply = self._implied_supply(
+            price,
+            market_cap
+        )
+
+        if (
+            t0_supply > 0
+            and current_supply > 0
+        ):
+
+            supply_ratio = (
+                current_supply
+                / t0_supply
+            )
+
+            if (
+                supply_ratio < 0.25
+                or supply_ratio > 4.0
+            ):
+                return (
+                    False,
+                    (
+                        "implied_supply_mismatch:"
+                        f"{supply_ratio:.4f}"
+                    )
+                )
+
+        return (
+            True,
+            None
+        )
+
+
     # =========================================================
     # TOKEN METADATA
     # =========================================================
@@ -1054,15 +1263,43 @@ class FeedLearningService:
                     continue
 
 
-                market = (
-                    self.market
-                    .fetch_market_data(
-                        feed_case.coin_address
+                reference_price = (
+                    self._latest_reference_price(
+                        db,
+                        feed_case
                     )
                 )
 
 
-                if not market:
+                market = (
+                    self.market
+                    .fetch_market_data(
+                        feed_case.coin_address,
+                        reference_price=(
+                            reference_price
+                        )
+                    )
+                )
+
+
+                valid_market, invalid_reason = (
+                    self._market_snapshot_is_valid(
+                        feed_case,
+                        market
+                    )
+                )
+
+
+                if not valid_market:
+
+                    print(
+                        (
+                            "Learning checkpoint skipped | "
+                            f"Case {feed_case.id} | "
+                            f"{feed_case.symbol} | "
+                            f"{invalid_reason}"
+                        )
+                    )
 
                     continue
 
