@@ -1,5 +1,6 @@
 import os
-from datetime import datetime
+import threading
+from datetime import datetime, timedelta
 
 import requests
 from dotenv import load_dotenv
@@ -17,6 +18,9 @@ LUNARCRUSH_BASE_URL = "https://lunarcrush.ai"
 
 
 class SocialCollector:
+
+    CACHE_TTL = timedelta(minutes=20)
+    RATE_LIMIT_COOLDOWN = timedelta(hours=6)
 
     def __init__(self):
 
@@ -36,7 +40,6 @@ class SocialCollector:
         )
 
         if self.api_key:
-
             self.session.headers.update(
                 {
                     "Authorization": (
@@ -44,6 +47,12 @@ class SocialCollector:
                     )
                 }
             )
+
+        self._cache = {}
+        self._cache_lock = threading.Lock()
+
+        self._rate_limited_until = None
+        self._rate_limit_lock = threading.Lock()
 
 
     def create_snapshot(
@@ -112,8 +121,8 @@ class SocialCollector:
         }
 
 
+    @staticmethod
     def _safe_float(
-        self,
         value,
         default=0.0
     ):
@@ -135,8 +144,8 @@ class SocialCollector:
             return default
 
 
+    @staticmethod
     def _safe_int(
-        self,
         value,
         default=0
     ):
@@ -160,8 +169,8 @@ class SocialCollector:
             return default
 
 
+    @staticmethod
     def _first_value(
-        self,
         dictionaries,
         keys,
         default=None
@@ -185,6 +194,145 @@ class SocialCollector:
                     return value
 
         return default
+
+
+    def _cache_key(
+        self,
+        coin_address,
+        topic
+    ):
+
+        return (
+            str(
+                topic
+                if topic
+                else coin_address
+            )
+            .strip()
+            .lower()
+        )
+
+
+    def _cache_get(
+        self,
+        key
+    ):
+
+        now = datetime.utcnow()
+
+        with self._cache_lock:
+
+            item = self._cache.get(
+                key
+            )
+
+            if not item:
+                return None
+
+            expires_at = item.get(
+                "expires_at"
+            )
+
+            if (
+                expires_at is None
+                or
+                now >= expires_at
+            ):
+
+                self._cache.pop(
+                    key,
+                    None
+                )
+
+                return None
+
+            snapshot = dict(
+                item[
+                    "snapshot"
+                ]
+            )
+
+        snapshot[
+            "source"
+        ] = "lunarcrush_cache"
+
+        snapshot[
+            "timestamp"
+        ] = now
+
+        return snapshot
+
+
+    def _cache_put(
+        self,
+        key,
+        snapshot
+    ):
+
+        if not snapshot.get(
+            "available"
+        ):
+            return
+
+        with self._cache_lock:
+
+            self._cache[
+                key
+            ] = {
+                "snapshot": dict(
+                    snapshot
+                ),
+
+                "expires_at": (
+                    datetime.utcnow()
+                    +
+                    self.CACHE_TTL
+                )
+            }
+
+
+    def _rate_limit_active(
+        self
+    ):
+
+        now = datetime.utcnow()
+
+        with self._rate_limit_lock:
+
+            until = (
+                self._rate_limited_until
+            )
+
+            if (
+                until is None
+                or
+                now >= until
+            ):
+
+                if (
+                    until is not None
+                    and
+                    now >= until
+                ):
+
+                    self._rate_limited_until = None
+
+                return False
+
+            return True
+
+
+    def _activate_rate_limit_cooldown(
+        self
+    ):
+
+        with self._rate_limit_lock:
+
+            self._rate_limited_until = (
+                datetime.utcnow()
+                +
+                self.RATE_LIMIT_COOLDOWN
+            )
 
 
     def fetch_social_data(
@@ -230,6 +378,44 @@ class SocialCollector:
             )
 
 
+        cache_key = (
+            self._cache_key(
+                coin_address,
+                topic
+            )
+        )
+
+
+        cached = (
+            self._cache_get(
+                cache_key
+            )
+        )
+
+
+        if cached:
+
+            cached[
+                "coin_address"
+            ] = coin_address
+
+            return cached
+
+
+        if self._rate_limit_active():
+
+            return self.create_snapshot(
+                coin_address=coin_address,
+                available=False,
+                source="lunarcrush",
+                error=(
+                    "LunarCrush daily rate limit "
+                    "cooldown is active"
+                ),
+                raw_status=429
+            )
+
+
         url = (
             f"{self.base_url}/"
             f"topic/"
@@ -251,6 +437,23 @@ class SocialCollector:
             status_code = (
                 response.status_code
             )
+
+
+            if status_code == 429:
+
+                self._activate_rate_limit_cooldown()
+
+                return self.create_snapshot(
+                    coin_address=coin_address,
+                    available=False,
+                    source="lunarcrush",
+                    error=(
+                        "HTTP 429: LunarCrush "
+                        "rate limit exceeded; "
+                        "cooldown activated"
+                    ),
+                    raw_status=status_code
+                )
 
 
             if status_code != 200:
@@ -285,18 +488,6 @@ class SocialCollector:
                     raw_status=status_code
                 )
 
-
-            # =========================================
-            # EXACT LUNARCRUSH STRUCTURE
-            #
-            # {
-            #   "data": {
-            #       "topic": "$bonk",
-            #       "asset": {...},
-            #       "ai_summary": {...}
-            #   }
-            # }
-            # =========================================
 
             data = (
                 body.get(
@@ -346,14 +537,6 @@ class SocialCollector:
                 ai_summary = {}
 
 
-            # =========================================
-            # ENGAGEMENT
-            #
-            # LunarCrush response:
-            #
-            # interactions_24h: 842482
-            # =========================================
-
             engagement = (
                 self._safe_int(
                     self._first_value(
@@ -372,13 +555,6 @@ class SocialCollector:
                 )
             )
 
-
-            # =========================================
-            # MENTIONS / ACTIVE POSTS
-            #
-            # Different LunarCrush topic responses may
-            # expose these under different names.
-            # =========================================
 
             mentions = (
                 self._safe_int(
@@ -401,10 +577,6 @@ class SocialCollector:
             )
 
 
-            # =========================================
-            # COMMUNITY / CONTRIBUTORS
-            # =========================================
-
             community_size = (
                 self._safe_int(
                     self._first_value(
@@ -425,14 +597,6 @@ class SocialCollector:
             )
 
 
-            # =========================================
-            # SOCIAL GROWTH
-            #
-            # Exact JSON supplied:
-            #
-            # ai_summary.social_growth = 12
-            # =========================================
-
             growth_rate = (
                 self._safe_float(
                     self._first_value(
@@ -451,14 +615,6 @@ class SocialCollector:
             )
 
 
-            # =========================================
-            # SOCIAL DOMINANCE
-            #
-            # Exact JSON supplied:
-            #
-            # asset.social_dominance
-            # =========================================
-
             social_dominance = (
                 self._safe_float(
                     asset.get(
@@ -468,14 +624,6 @@ class SocialCollector:
                 )
             )
 
-
-            # =========================================
-            # GALAXY SCORE
-            #
-            # Exact JSON supplied:
-            #
-            # asset.galaxy_score
-            # =========================================
 
             galaxy_score = (
                 self._safe_float(
@@ -487,10 +635,6 @@ class SocialCollector:
             )
 
 
-            # =========================================
-            # ALT RANK
-            # =========================================
-
             alt_rank = (
                 self._safe_int(
                     asset.get(
@@ -500,12 +644,6 @@ class SocialCollector:
                 )
             )
 
-
-            # =========================================
-            # SENTIMENT
-            #
-            # Check all possible locations.
-            # =========================================
 
             sentiment = (
                 self._safe_float(
@@ -524,14 +662,6 @@ class SocialCollector:
                 )
             )
 
-
-            # =========================================
-            # AVAILABILITY
-            #
-            # We now know engagement/social growth/etc.
-            # can prove that LunarCrush returned useful
-            # data even when mentions is unavailable.
-            # =========================================
 
             available = any(
                 [
@@ -557,7 +687,7 @@ class SocialCollector:
                 )
 
 
-            return self.create_snapshot(
+            snapshot = self.create_snapshot(
                 coin_address=coin_address,
 
                 mentions=mentions,
@@ -588,6 +718,15 @@ class SocialCollector:
 
                 raw_status=status_code
             )
+
+
+            self._cache_put(
+                cache_key,
+                snapshot
+            )
+
+
+            return snapshot
 
 
         except requests.Timeout:
