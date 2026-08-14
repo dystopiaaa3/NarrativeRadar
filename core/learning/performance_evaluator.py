@@ -29,6 +29,12 @@ class PerformanceEvaluator:
         "24h",
     )
 
+    # V2 begins with case 823. Case 822 was created at
+    # 2026-08-12 20:39:35 UTC; case 823 was created at
+    # 2026-08-12 20:58:25 UTC after the hardened market
+    # validation deployment went live.
+    V2_START_CASE_ID = 823
+
     def __init__(self):
 
         self.name = (
@@ -1593,6 +1599,235 @@ class PerformanceEvaluator:
 
 
     # =========================================================
+    # OLD VS V2 COHORTS
+    # =========================================================
+
+    def _cohort_name(self, feed_case):
+
+        case_id = self._safe_int(
+            getattr(feed_case, "id", 0)
+        )
+
+        if case_id <= 0:
+            return "UNKNOWN"
+
+        return (
+            "V2"
+            if case_id >= self.V2_START_CASE_ID
+            else "OLD"
+        )
+
+
+    def _cohort_summary(self, rows):
+
+        count = len(rows)
+
+        if count <= 0:
+
+            return {
+                "cases": 0,
+                "wins": 0,
+                "win_rate": 0.0,
+                "practical_successes": 0,
+                "practical_success_rate": 0.0,
+                "false_positives": 0,
+                "false_positive_rate": 0.0,
+                "false_negatives": 0,
+                "median_15m": 0.0,
+                "median_1h": 0.0,
+                "median_6h": 0.0,
+                "median_24h": 0.0,
+                "median_peak": 0.0,
+                "median_drawdown": 0.0,
+                "score_buckets": {},
+            }
+
+
+        wins = sum(
+            1
+            for item in rows
+            if item.get("winner")
+        )
+
+        practical = sum(
+            1
+            for item in rows
+            if item.get("practical_success")
+        )
+
+        false_positives = sum(
+            1
+            for item in rows
+            if (
+                self._safe_float(
+                    item.get("score")
+                )
+                >= 65
+                and
+                not item.get("winner")
+            )
+        )
+
+        false_negatives = sum(
+            1
+            for item in rows
+            if (
+                self._safe_float(
+                    item.get("score")
+                )
+                < 50
+                and
+                item.get("winner")
+            )
+        )
+
+
+        def med(field):
+
+            values = [
+                self._safe_float(
+                    item.get(field)
+                )
+                for item in rows
+            ]
+
+            return (
+                round(median(values), 2)
+                if values
+                else 0.0
+            )
+
+
+        score_groups = [
+            {
+                **item,
+                "group": self._score_bucket(
+                    item.get("score")
+                ),
+            }
+            for item in rows
+        ]
+
+
+        return {
+            "cases": count,
+
+            "wins": wins,
+
+            "win_rate": round(
+                wins / count * 100,
+                2,
+            ),
+
+            "practical_successes": practical,
+
+            "practical_success_rate": round(
+                practical / count * 100,
+                2,
+            ),
+
+            "false_positives": (
+                false_positives
+            ),
+
+            "false_positive_rate": round(
+                false_positives / count * 100,
+                2,
+            ),
+
+            "false_negatives": (
+                false_negatives
+            ),
+
+            "median_15m": med("return_15m"),
+
+            "median_1h": med("return_1h"),
+
+            "median_6h": med("return_6h"),
+
+            "median_24h": med("return_24h"),
+
+            "median_peak": med("peak"),
+
+            "median_drawdown": med("drawdown"),
+
+            "score_buckets": (
+                self._group_stats(
+                    score_groups
+                )
+            ),
+        }
+
+
+    def _cohort_comparison(self, case_rows):
+
+        old = self._cohort_summary(
+            [
+                item
+                for item in case_rows
+                if item.get("cohort") == "OLD"
+            ]
+        )
+
+        v2 = self._cohort_summary(
+            [
+                item
+                for item in case_rows
+                if item.get("cohort") == "V2"
+            ]
+        )
+
+
+        return {
+            "v2_start_case_id": (
+                self.V2_START_CASE_ID
+            ),
+
+            "old": old,
+
+            "v2": v2,
+
+            "delta_v2_minus_old": {
+                "win_rate": round(
+                    v2["win_rate"]
+                    - old["win_rate"],
+                    2,
+                ),
+
+                "practical_success_rate": round(
+                    v2["practical_success_rate"]
+                    - old["practical_success_rate"],
+                    2,
+                ),
+
+                "false_positive_rate": round(
+                    v2["false_positive_rate"]
+                    - old["false_positive_rate"],
+                    2,
+                ),
+
+                "median_24h": round(
+                    v2["median_24h"]
+                    - old["median_24h"],
+                    2,
+                ),
+
+                "median_peak": round(
+                    v2["median_peak"]
+                    - old["median_peak"],
+                    2,
+                ),
+
+                "median_drawdown": round(
+                    v2["median_drawdown"]
+                    - old["median_drawdown"],
+                    2,
+                ),
+            },
+        }
+
+
+    # =========================================================
     # BUILD CASE ROW
     # =========================================================
 
@@ -1639,6 +1874,12 @@ class PerformanceEvaluator:
         return {
             "id": (
                 feed_case.id
+            ),
+
+            "cohort": (
+                self._cohort_name(
+                    feed_case
+                )
             ),
 
             "coin_id": (
@@ -2518,6 +2759,13 @@ class PerformanceEvaluator:
             }
 
 
+            cohort_comparison = (
+                self._cohort_comparison(
+                    case_rows
+                )
+            )
+
+
             # =================================================
             # RETURN
             #
@@ -2623,6 +2871,10 @@ class PerformanceEvaluator:
 
                 "calibration": (
                     calibration
+                ),
+
+                "cohort_comparison": (
+                    cohort_comparison
                 ),
 
                 "cases": (
