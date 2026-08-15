@@ -249,6 +249,33 @@ class FullRadar:
 
 
         # =========================================
+        # V3: OPPORTUNITY + INDEPENDENT RISK
+        # =========================================
+
+        opportunity_score = self.scorer.opportunity_score(
+            market_analysis,
+            market_score,
+            social_score,
+            wallet_score,
+            social_available=social_available,
+            wallet_available=wallet_available,
+        )
+
+        risk_score = self.scorer.risk_score(
+            market_analysis,
+            data_quality=data_quality,
+            wallet_score=wallet_score,
+            wallet_available=wallet_available,
+        )
+
+        v3_action = self.scorer.v3_action(
+            opportunity_score,
+            risk_score,
+            data_quality=data_quality,
+        )
+
+
+        # =========================================
         # NARRATIVE
         # =========================================
 
@@ -433,6 +460,18 @@ class FullRadar:
 
                 "combined_score": (
                     combined_score
+                ),
+
+                "opportunity_score": (
+                    opportunity_score
+                ),
+
+                "risk_score": (
+                    risk_score
+                ),
+
+                "v3_action": (
+                    v3_action
                 ),
 
                 "data_quality": (
