@@ -283,7 +283,7 @@ class IntelligenceScorer:
 
         return max(0.0, min(round(risk, 2), 100.0))
 
-    def v3_action(self, opportunity_score, risk_score):
+    def v3_action(self, opportunity_score, risk_score, data_quality=None):
         if opportunity_score >= 75 and risk_score <= 35:
             return "ENTER_WATCH"
         if opportunity_score >= 70 and risk_score <= 65:
