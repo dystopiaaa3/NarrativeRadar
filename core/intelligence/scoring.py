@@ -219,3 +219,75 @@ class IntelligenceScorer:
             weighted_score / total_weight,
             2
         )
+
+    def opportunity_score(self, market_analysis, market_score, social_score=0.0, wallet_score=0.0, social_available=False, wallet_available=False):
+        """V3: score near-term upside separately from downside risk."""
+        liq_ratio = float(market_analysis.get("liquidity_ratio", 0) or 0)
+        vol_ratio = float(market_analysis.get("volume_ratio", 0) or 0)
+
+        # Market remains the anchor. Reward useful activity, but avoid assuming
+        # that ever-higher churn is automatically better.
+        score = float(market_score) * 0.65
+        if 0.02 <= liq_ratio <= 0.30:
+            score += 10
+        elif liq_ratio >= 0.01:
+            score += 5
+
+        if 0.05 <= vol_ratio <= 1.50:
+            score += 12
+        elif vol_ratio > 0:
+            score += 4
+
+        if social_available:
+            score += float(social_score) * 0.12
+        if wallet_available:
+            score += float(wallet_score) * 0.13
+
+        return min(round(score, 2), 100.0)
+
+    def risk_score(self, market_analysis, data_quality=100.0, wallet_score=0.0, wallet_available=False):
+        """V3: 0 = lower observed risk, 100 = higher observed risk."""
+        market_cap = float(market_analysis.get("market_cap", 0) or 0)
+        liquidity = float(market_analysis.get("liquidity", 0) or 0)
+        liq_ratio = float(market_analysis.get("liquidity_ratio", 0) or 0)
+        vol_ratio = float(market_analysis.get("volume_ratio", 0) or 0)
+        risk = 0.0
+
+        if liquidity < 5000:
+            risk += 35
+        elif liquidity < 15000:
+            risk += 25
+        elif liquidity < 30000:
+            risk += 15
+
+        if market_cap <= 0:
+            risk += 25
+        elif liq_ratio < 0.005:
+            risk += 30
+        elif liq_ratio < 0.01:
+            risk += 18
+
+        if vol_ratio > 5.0:
+            risk += 25
+        elif vol_ratio > 2.0:
+            risk += 15
+
+        if float(data_quality) < 34:
+            risk += 20
+        elif float(data_quality) < 67:
+            risk += 10
+
+        # Strong validated buy-side wallet evidence can reduce, never erase, risk.
+        if wallet_available and float(wallet_score) >= 80:
+            risk -= 10
+
+        return max(0.0, min(round(risk, 2), 100.0))
+
+    def v3_action(self, opportunity_score, risk_score):
+        if opportunity_score >= 75 and risk_score <= 35:
+            return "ENTER_WATCH"
+        if opportunity_score >= 70 and risk_score <= 65:
+            return "SPECULATIVE"
+        if opportunity_score >= 50 and risk_score <= 75:
+            return "MONITOR"
+        return "IGNORE"
