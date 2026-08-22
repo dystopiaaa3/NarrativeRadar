@@ -10,6 +10,7 @@ from core.intelligence.pattern_matcher import PatternMatcher
 from core.intelligence.pattern_learning import PatternLearning
 
 from core.intelligence.radar_engine import RadarEngine
+from core.ml.runtime import MLRuntime
 
 
 class FullRadar:
@@ -33,6 +34,10 @@ class FullRadar:
         self.pattern_learning = PatternLearning()
 
         self.radar_engine = RadarEngine()
+
+        # XGBoost V4 runs in SHADOW mode. It never overrides
+        # the existing Radar/V3 decision until we prove it wins.
+        self.ml_runtime = MLRuntime.get_instance()
 
 
     def analyze(
@@ -439,6 +444,26 @@ class FullRadar:
 
 
         # =========================================
+        # XGBOOST V4 SHADOW PREDICTION
+        #
+        # This is observation-only. Existing V3 signal/decision/risk
+        # remain authoritative until chronological testing proves ML wins.
+        # =========================================
+
+        ml_prediction = self.ml_runtime.predict(
+            market_data,
+            {
+                "market_score": market_score,
+                "social_score": social_score,
+                "wallet_score": wallet_score,
+                "combined_score": combined_score,
+                "data_quality": data_quality,
+            },
+            signal=final_signal,
+        )
+
+
+        # =========================================
         # RETURN
         # =========================================
 
@@ -472,6 +497,10 @@ class FullRadar:
 
                 "v3_action": (
                     v3_action
+                ),
+
+                "ml": (
+                    ml_prediction
                 ),
 
                 "data_quality": (
